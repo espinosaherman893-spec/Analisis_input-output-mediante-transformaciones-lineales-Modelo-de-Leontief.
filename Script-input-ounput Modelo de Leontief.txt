@@ -1,0 +1,267 @@
+%MODELO INPUT-OUTPUT (LEONTIEF) - CODIGO COMPLETO CON EXCEL + ALTERACION + GRAFICAS PRO
+clear; clc;
+
+disp('   MODELO INPUT-OUTPUT (LEONTIEF) - MATLAB (DATOS DESDE EXCEL)')
+
+
+% LECTURA DE DATOS DESDE EXCEL
+
+% El modelo usa una base de datos real almacenada en un archivo Excel.
+archivo = 'MIPDatos2020C_p.xlsm';
+hoja = 'Matriz Simetrica';
+
+% Si el archivo no esta en la carpeta actual, se abre un selector
+if ~isfile(archivo)
+    [file, path] = uigetfile({'*.xls;*.xlsx;*.xlsm','Archivos Excel'}, 'Seleccione el Excel');
+    if isequal(file,0)
+        error('No se selecciono ningun archivo.');
+    end
+    archivo = fullfile(path, file);
+end
+
+% Carga de nombres de sectores
+sectores = readcell(archivo, 'Sheet', hoja, 'Range', 'D10:D80');
+n = length(sectores);
+
+% Carga de la matriz Z (consumos intermedios)
+Z = readmatrix(archivo, 'Sheet', hoja, 'Range', 'E10:BW80');
+
+% Carga del vector de demanda final
+f = readmatrix(archivo, 'Sheet', hoja, 'Range', 'CE10:CE80');
+
+disp('Sectores cargados desde Excel:')
+disp(sectores)
+
+
+% VALIDACIONES BASICAS
+% Solo para avisar si hay algo raro (no detiene el programa).
+if any(isnan(Z(:))) || any(isnan(f(:)))
+    warning('Se detectaron valores vacios (NaN) en Z o en f. Revise el rango del Excel.');
+end
+if any(Z(:) < 0)
+    warning('Z tiene valores negativos. Revise si eso es correcto en su tabla IO.');
+end
+if any(f < 0)
+    warning('f tiene valores negativos. Revise si eso es correcto.');
+end
+
+
+% PRODUCCION TOTAL
+
+% La produccion total de cada sector se obtiene sumando
+x = sum(Z, 2) + f;
+
+if any(x <= 0)
+    error('Existe al menos un sector con produccion total x <= 0. No se puede continuar.');
+end
+
+
+% MATRIZ DE COEFICIENTES TECNICOS
+% Indica cuánto necesita cada sector de los demas sectores
+A = Z ./ (ones(n,1) * x');
+
+
+% INVERSA DE LEONTIEF
+
+% Permite calcular el efecto total de un cambio en la demanda
+
+I = eye(n);
+M = I - A;
+
+% Chequeo numerico (invertibilidad)
+c = cond(M);
+fprintf('\ncond(I - A) = %.3e\n', c);
+if ~isfinite(c) || c > 1e12
+    warning('I-A esta mal condicionada (puede dar resultados inestables).');
+end
+
+L = M \ I;
+
+% VERIFICACION DEL MODELO
+x_recon = L * f;
+err_rel = norm(x - x_recon) / max(norm(x), eps);
+fprintf('Error relativo ||x - Lf||/||x|| = %.3e\n', err_rel);
+
+
+% MULTIPLICADORES Y ENCADENAMIENTOS
+% Mide cuanto aumenta la produccion total cuando aumenta la demanda.
+mult_prod = sum(L,1)';
+
+
+% BL: encadenamiento hacia atras 
+% FL: encadenamiento hacia adelante 
+BL = sum(L,1)';
+FL = sum(L,2);
+
+% Normalizacion de encadenamientos
+BLn = BL / mean(BL);
+FLn = FL / mean(FL);
+
+% Identificacion de sectores clave
+esClave = (BLn > 1) & (FLn > 1);
+
+
+% ALTERACION DE DEMANDA FINAL
+% Permite simular un cambio en la demanda de un sector y ver el efecto
+
+resp = lower(strtrim(input('Desea aplicar una alteracion de la demanda final? (s/n): ', 's')));
+
+dx = zeros(n,1); % Cambio en la produccion total
+df = zeros(n,1); % Cambio en la demanda final
+
+if strcmp(resp,'s')
+
+    % Muestra la lista para elegir facil
+    disp('Sectores disponibles:')
+    for i = 1:n
+        fprintf('%d -> %s\n', i, sectores{i});
+    end
+
+    k = input('Sector k = ');
+    if k < 1 || k > n
+        error('Sector k fuera de rango.');
+    end
+
+    tipo = lower(strtrim(input('Alteracion en porcentaje o en unidades? (p/u): ', 's')));
+
+    if strcmp(tipo,'p')
+        p = input('Porcentaje (ej. 10 para 10%): ');
+        df(k) = (p/100) * f(k);
+    elseif strcmp(tipo,'u')
+        u = input('Unidades a aumentar (ej. 5): ');
+        df(k) = u;
+    else
+        error('Opcion invalida. Use p o u.');
+    end
+
+    dx = L * df;
+
+    fprintf('Alteracion aplicada en: %s\n', sectores{k});
+    disp(table(sectores, f, df, dx, 'VariableNames', {'Sector','f_original','Delta_f','Delta_x'}));
+
+    % GRAFICA DE LEONTIEF (IMPACTO TOTAL DEL CAMBIO EN LA DEMANDA)
+    % Muestra cuanto cambia la produccion de cada sector por la alteracion aplicada
+    TOP_SHOCK = 20; % para que se vea bien con muchos sectores
+
+    [~, idxD] = sort(abs(dx), 'descend');
+    idxTopD = idxD(1:min(TOP_SHOCK, n));
+    dxTop = dx(idxTopD);
+    secTopD = sectores(idxTopD);
+
+    figure('Color','w');
+    bS = barh(dxTop, 'FaceColor','flat'); grid on; box on;
+
+    title(['Impacto Leontief: Cambio en la produccion (\Delta x) - TOP ', num2str(TOP_SHOCK)],'FontWeight','bold');
+    xlabel('Cambio en produccion (\Delta x)','FontWeight','bold');
+    ylabel('Sector','FontWeight','bold');
+
+    set(gca,'YTick',1:length(secTopD),'YTickLabel',secTopD,...
+        'FontSize',9,'LineWidth',1.2,'GridAlpha',0.25);
+    set(gca,'YDir','reverse');
+
+    for i = 1:length(dxTop)
+        if dxTop(i) >= 0
+            bS.CData(i,:) = [0.00 0.45 0.74]; % sube
+        else
+            bS.CData(i,:) = [0.85 0.33 0.10]; % baja
+        end
+        text(dxTop(i), i, ['  ' sprintf('%.2f', dxTop(i))], ...
+            'VerticalAlignment','middle','FontSize',9,'FontWeight','bold');
+    end
+
+    % GRAFICA ANTES vs DESPUES (TOP)
+    % Compara la produccion original con la nueva produccion luego de la alteracion
+    x_nuevo = x + dx;
+
+    TOP_X = 20;
+    [~, idxX] = sort(x, 'descend');
+    idxTopX = idxX(1:min(TOP_X, n));
+    xTop = x(idxTopX);
+    xTopNew = x_nuevo(idxTopX);
+    secTopX = sectores(idxTopX);
+
+    figure('Color','w');
+    bar([xTop, xTopNew]); grid on; box on;
+
+    title(['Produccion: Antes vs Despues (TOP ',num2str(TOP_X),')'],'FontWeight','bold');
+    xlabel('Sector','FontWeight','bold');
+    ylabel('Produccion','FontWeight','bold');
+
+    set(gca,'XTick',1:length(secTopX),'XTickLabel',secTopX,'XTickLabelRotation',45,...
+        'FontSize',9,'LineWidth',1.2,'GridAlpha',0.25);
+    legend({'Original (x)','Nueva (x+\Delta x)'}, 'Location','best');
+end
+
+
+% RESULTADOS EN TABLA
+% Presenta los principales indicadores del modelo de forma ordenada.
+disp('RESULTADOS PRINCIPALES')
+T = table(sectores, x, mult_prod, BLn, FLn, esClave, ...
+    'VariableNames', {'Sector','Produccion_x','MultiplicadorProd','BL_norm','FL_norm','SectorClave'});
+disp(T)
+
+
+% GRAFICO DE ENCADENAMIENTOS (BL vs FL)
+% Permite visualizar que sectores tienen mayor influencia en la economia.
+figure('Color','w');
+scatter(BLn, FLn, 120, 'filled', ...
+    'MarkerFaceAlpha',0.85,'MarkerEdgeColor',[0.2 0.2 0.2],'LineWidth',1.2);
+grid on; box on;
+xlabel('Backward linkage (normalizado)','FontWeight','bold');
+ylabel('Forward linkage (normalizado)','FontWeight','bold');
+title('Encadenamientos sectoriales (Rasmussen-Hirschman)','FontWeight','bold');
+xline(1,'--','LineWidth',1.5);
+yline(1,'--','LineWidth',1.5);
+set(gca,'FontSize',11,'LineWidth',1.2,'GridAlpha',0.25);
+
+
+% GRAFICO DE PRODUCCION TOTAL 
+% Para que el grafico sea legible, se muestran solo los sectores
+TOP_N = 20;
+
+% Se ordena la produccion de mayor a menor
+[~, idx] = sort(x,'descend');
+idxTop = idx(1:min(TOP_N,n));
+xTop = x(idxTop);
+sectTop = sectores(idxTop);
+
+figure('Color','w');
+
+% Grafico de barras horizontales (estilo Excel)
+b = barh(xTop,'FaceColor','flat'); grid on; box on;
+
+% Paleta de colores
+excelColors = [
+    0.18 0.55 0.34
+    0.00 0.45 0.74
+    0.93 0.69 0.13
+    0.85 0.33 0.10
+    0.49 0.18 0.56
+    0.30 0.75 0.93
+    0.64 0.08 0.18
+];
+
+% Asignacion de colores a cada barra
+for i = 1:length(xTop)
+    b.CData(i,:) = excelColors(mod(i-1,size(excelColors,1))+1,:);
+end
+
+% Etiquetas y formato del grafico
+title(['Produccion total por sector (x) - TOP ',num2str(TOP_N)],'FontWeight','bold');
+xlabel('Produccion','FontWeight','bold');
+ylabel('Sector','FontWeight','bold');
+
+set(gca,'YTick',1:length(sectTop),'YTickLabel',sectTop,...
+    'FontSize',9,'LineWidth',1.2,'GridAlpha',0.25);
+
+% Coloca el sector con mayor produccion arriba
+set(gca,'YDir','reverse');
+
+% Muestra el valor numerico junto a cada barra
+for i = 1:length(xTop)
+    text(xTop(i),i,['  ',sprintf('%.2f',xTop(i))],...
+        'VerticalAlignment','middle','FontSize',9,'FontWeight','bold');
+end
+
+disp('Listo. Modelo calculado correctamente.')
+
